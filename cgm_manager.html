@@ -68,6 +68,7 @@
     .workspace-head .title { flex: 1; }
     .workspace-head h1 { margin: 0; font-family: "Space Grotesk", "Inter", sans-serif; font-size: 30px; letter-spacing: .2px; }
     .workspace-head p { margin: 3px 0 0; color: var(--muted); }
+    .dirty-note { padding: 10px 12px; color: #6f4a11; background: #fff3de; border: 1px solid #ffd8a3; border-radius: 12px; font-size: 13px; }
     .actions { display: flex; gap: 8px; }
     .toolbar { display: grid; grid-template-columns: minmax(180px, 1fr) auto auto; gap: 8px; padding: 12px; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; }
     .search { min-height: 40px; padding: 8px 12px; color: var(--ink); background: white; border: 1px solid var(--line); border-radius: 10px; }
@@ -163,7 +164,7 @@
   </script>
   <script>
     "use strict";
-    const state = { root: null, platforms: [], selected: null, globalHandle: null, globalDirectory: null, globalRows: [], globalTrailingNul: false, query: "", filter: "all", sortBy: "filename", sortDir: "asc", dirty: false, backups: new Set(), thumbnailObserver: null, archiveApiPromise: null, zipApiPromise: null, progress: null };
+    const state = { root: null, platforms: [], selected: null, globalHandle: null, globalDirectory: null, globalRows: [], globalTrailingNul: false, query: "", filter: "all", sortBy: "filename", sortDir: "asc", dirty: false, dirtyReason: "", backups: new Set(), thumbnailObserver: null, archiveApiPromise: null, zipApiPromise: null, progress: null };
     const platformList = document.querySelector("#platformList");
     const main = document.querySelector("#main");
     const headerStatus = document.querySelector("#headerStatus");
@@ -371,7 +372,7 @@
       try {
         const root = await window.showDirectoryPicker({ id: "cubegm-card", mode: "readwrite" });
         releaseImageUrls();
-        state.root = root; state.platforms = []; state.selected = null; state.backups.clear();
+        state.root = root; state.platforms = []; state.selected = null; state.dirty = false; state.dirtyReason = ""; state.backups.clear();
         headerStatus.textContent = `Scanning ${root.name}...`;
         await findGlobalList(root);
         for await (const [name, entry] of root.entries()) {
@@ -481,17 +482,26 @@
       const unlistedCount = all.filter(row => !row.listed).length;
       const missingRomCount = platform.rows.filter(row => !rowStatus(platform, row).romPresent).length;
       const missingImageCount = all.filter(row => { const status = rowStatus(platform, row); return status.romPresent && !status.imagePresent; }).length;
-      main.innerHTML = `<section class="workspace"><div class="workspace-head"><div class="title"><h1>${escapeHtml(platform.name)}</h1><p>${platform.rows.length.toLocaleString()} listed · ${platform.roms.size.toLocaleString()} files on card · ${platform.images.size.toLocaleString()} images${platform.duplicateCount ? ` · ${platform.duplicateCount.toLocaleString()} duplicates merged` : ""}</p></div><div class="actions"><button class="button secondary" id="addRowButton">+ Add row</button><button class="button primary" id="saveButton" ${state.dirty ? "" : "disabled"}>Save lists${state.dirty ? " *" : ""}</button></div></div><div class="toolbar"><input class="search" id="searchInput" type="search" placeholder="Search filenames and titles" value="${escapeHtml(state.query)}"><div class="filters">${filterButton("all", "All", platform.rows.length + unlistedCount)}${filterButton("unlisted", "Unlisted", unlistedCount)}${filterButton("missing-rom", "Missing ROM", missingRomCount)}${filterButton("missing-image", "Missing image", missingImageCount)}</div><button class="button secondary" id="addMissingButton" ${unlistedCount ? "" : "disabled"}>Add all unlisted</button></div><div class="table-wrap"><table><colgroup><col style="width:68px"><col style="width:23%"><col style="width:20%"><col style="width:18%"><col style="width:13%"><col style="width:13%"><col style="width:5%"></colgroup><thead><tr><th>Artwork</th><th class="sortable" data-sort="filename">File name${sortArrow("filename")}</th><th>English title</th><th>Chinese title</th><th>Search key</th><th class="sortable" data-sort="status">Status${sortArrow("status")}</th><th></th></tr></thead><tbody>${records.map(row => renderRow(platform, row)).join("") || `<tr><td colspan="7">No rows match this view.</td></tr>`}</tbody></table></div><div class="drop-zone" id="dropZone">${renderDropZoneContent()}</div></section>`;
+      const dirtyNote = state.dirtyReason ? `<div class="dirty-note">${escapeHtml(state.dirtyReason)}</div>` : "";
+      const saveTitle = state.dirtyReason ? `title="${escapeHtml(state.dirtyReason)}"` : "";
+      main.innerHTML = `<section class="workspace"><div class="workspace-head"><div class="title"><h1>${escapeHtml(platform.name)}</h1><p>${platform.rows.length.toLocaleString()} listed · ${platform.roms.size.toLocaleString()} files on card · ${platform.images.size.toLocaleString()} images${platform.duplicateCount ? ` · ${platform.duplicateCount.toLocaleString()} duplicates merged` : ""}</p></div><div class="actions"><button class="button secondary" id="addRowButton">+ Add row</button><button class="button primary" id="saveButton" ${saveTitle} ${state.dirty ? "" : "disabled"}>Save lists${state.dirty ? " *" : ""}</button></div></div>${dirtyNote}<div class="toolbar"><input class="search" id="searchInput" type="search" placeholder="Search filenames and titles" value="${escapeHtml(state.query)}"><div class="filters">${filterButton("all", "All", platform.rows.length + unlistedCount)}${filterButton("unlisted", "Unlisted", unlistedCount)}${filterButton("missing-rom", "Missing ROM", missingRomCount)}${filterButton("missing-image", "Missing image", missingImageCount)}</div><button class="button secondary" id="addMissingButton" ${unlistedCount ? "" : "disabled"}>Add all unlisted</button></div><div class="table-wrap"><table><colgroup><col style="width:68px"><col style="width:23%"><col style="width:20%"><col style="width:18%"><col style="width:13%"><col style="width:13%"><col style="width:5%"></colgroup><thead><tr><th>Artwork</th><th class="sortable" data-sort="filename">File name${sortArrow("filename")}</th><th>English title</th><th>Chinese title</th><th>Search key</th><th class="sortable" data-sort="status">Status${sortArrow("status")}</th><th></th></tr></thead><tbody>${records.map(row => renderRow(platform, row)).join("") || `<tr><td colspan="7">No rows match this view.</td></tr>`}</tbody></table></div><div class="drop-zone" id="dropZone">${renderDropZoneContent()}</div></section>`;
       startThumbnailLoading(platform);
       updateDropZone();
     }
     function selectPlatform(name) {
       if (state.dirty && !confirm("Discard unsaved list edits?")) return;
-      state.selected = state.platforms.find(platform => platform.name === name); state.query = ""; state.filter = "all"; state.dirty = state.selected.duplicateCount > 0;
+      state.selected = state.platforms.find(platform => platform.name === name); state.query = ""; state.filter = "all";
+      const duplicateCount = state.selected?.duplicateCount || 0;
+      state.dirty = duplicateCount > 0;
+      state.dirtyReason = duplicateCount > 0
+        ? `${duplicateCount.toLocaleString()} duplicate filelist entries were merged during scan. Save lists to persist this cleanup.`
+        : "";
       renderPlatforms(); renderWorkspace();
     }
-    function setDirty() {
+    function setDirty(reason = "") {
       state.dirty = true;
+      if (reason) state.dirtyReason = reason;
+      else if (!state.dirtyReason) state.dirtyReason = "You have unsaved list changes.";
       const button = document.querySelector("#saveButton");
       if (button) { button.disabled = false; button.textContent = "Save lists *"; }
     }
@@ -535,7 +545,7 @@
         }
         platform.duplicateCount = 0;
         setProgress({ label: `Saving ${platform.name}`, detail: "Refreshing lists...", value: 95, indeterminate: false });
-        state.dirty = false; renderPlatforms(); renderWorkspace();
+        state.dirty = false; state.dirtyReason = ""; renderPlatforms(); renderWorkspace();
         notify(`Saved ${platform.name}/filelist.csv${state.globalHandle ? " and cubegm/allfiles.lst" : ""}.`);
         return true;
       } catch (error) { notify(`Save failed: ${friendlyError(error)}`, true); return false; }
