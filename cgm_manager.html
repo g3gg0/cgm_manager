@@ -46,6 +46,9 @@
     .button.secondary { color: var(--ink); background: white; border-color: var(--line); }
     .button.danger { color: var(--red); background: #fff5f3; border-color: #f2b8b5; }
     .button.icon { width: 38px; min-height: 34px; padding: 4px; border-radius: 10px; }
+    .button.favorite { color: #7a859e; }
+    .button.favorite.active { color: #c47f00; background: #fff4da; border-color: #ffd18b; }
+    .button.favorite.active:hover { background: #ffe9bb; }
     .layout { display: grid; grid-template-columns: 270px minmax(0, 1fr); min-height: 0; border: 1px solid var(--line); border-radius: 16px; overflow: hidden; background: var(--panel); box-shadow: var(--shadow); }
     aside { min-height: 0; overflow: auto; padding: 18px 12px; background: linear-gradient(180deg, #fcfdff, #f6f8fd); border-right: 1px solid var(--line); }
     .aside-title { margin: 0 8px 10px; color: var(--muted); font-size: 12px; font-weight: 800; text-transform: uppercase; }
@@ -164,7 +167,7 @@
   </script>
   <script>
     "use strict";
-    const state = { root: null, platforms: [], selected: null, globalHandle: null, globalDirectory: null, globalRows: [], globalTrailingNul: false, query: "", filter: "all", sortBy: "filename", sortDir: "asc", dirty: false, dirtyReason: "", backups: new Set(), thumbnailObserver: null, archiveApiPromise: null, zipApiPromise: null, progress: null };
+    const state = { root: null, platforms: [], selected: null, globalHandle: null, globalDirectory: null, globalRows: [], globalTrailingNul: false, favoritesHandle: null, favoritesRows: [], favoritesPaths: new Set(), favoritesTrailingNul: false, favoritesEncoding: "utf-8", favoritesHasBom: false, query: "", filter: "all", sortBy: "filename", sortDir: "asc", dirty: false, dirtyReason: "", backups: new Set(), thumbnailObserver: null, archiveApiPromise: null, zipApiPromise: null, progress: null };
     const platformList = document.querySelector("#platformList");
     const main = document.querySelector("#main");
     const headerStatus = document.querySelector("#headerStatus");
@@ -235,6 +238,45 @@
       return String(value).replace(/[&<>"]/g, character => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;" })[character]);
     }
     function stripControlEnd(text) { return text.replace(/^\uFEFF/, "").replace(/\0+$/g, ""); }
+    function decodeTextBytes(bytes) {
+      if (bytes.length >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
+        return { text: new TextDecoder("utf-16be").decode(bytes.slice(2)), encoding: "utf-16be", hasBom: true };
+      }
+      if (bytes.length >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
+        return { text: new TextDecoder("utf-16le").decode(bytes.slice(2)), encoding: "utf-16le", hasBom: true };
+      }
+      return { text: new TextDecoder("utf-8").decode(bytes), encoding: "utf-8", hasBom: false };
+    }
+    function encodeTextBytes(text, encoding, includeBom = false) {
+      if (encoding === "utf-16be" || encoding === "utf-16le") {
+        const littleEndian = encoding === "utf-16le";
+        const content = new Uint8Array(text.length * 2);
+        for (let index = 0; index < text.length; index += 1) {
+          const code = text.charCodeAt(index);
+          const offset = index * 2;
+          if (littleEndian) {
+            content[offset] = code & 0xff;
+            content[offset + 1] = (code >> 8) & 0xff;
+          } else {
+            content[offset] = (code >> 8) & 0xff;
+            content[offset + 1] = code & 0xff;
+          }
+        }
+        if (!includeBom) return content;
+        const bom = littleEndian ? new Uint8Array([0xff, 0xfe]) : new Uint8Array([0xfe, 0xff]);
+        const bytes = new Uint8Array(bom.length + content.length);
+        bytes.set(bom, 0);
+        bytes.set(content, bom.length);
+        return bytes;
+      }
+      const content = new TextEncoder().encode(text);
+      if (!includeBom) return content;
+      const bom = new Uint8Array([0xef, 0xbb, 0xbf]);
+      const bytes = new Uint8Array(bom.length + content.length);
+      bytes.set(bom, 0);
+      bytes.set(content, bom.length);
+      return bytes;
+    }
     function parseCsv(text) {
       const rows = [];
       let row = [], field = "", quoted = false;
@@ -259,6 +301,15 @@
     function serializeCsv(rows) { return `${rows.map(row => row.map(csvField).join(",")).join("\r\n")}\r\n`; }
     function parseGlobal(text) { return stripControlEnd(text).split(/\r?\n/).filter(Boolean).map(line => line.split("|")); }
     function serializeGlobal(rows) { return `${rows.map(row => row.map(value => String(value || "").replace(/\|/g, "/")).join("|")).join("\r\n")}\r\n${state.globalTrailingNul ? "\0" : ""}`; }
+    function refreshFavoritePathSet() {
+      state.favoritesPaths = new Set(state.favoritesRows.map(row => (row[0] || "").toLowerCase()));
+    }
+    function favoritePath(platform, row) {
+      return `${platform.name}/${String(row.filename || "").trim()}`;
+    }
+    function isFavorite(platform, row) {
+      return state.favoritesPaths.has(favoritePath(platform, row).toLowerCase());
+    }
     function basename(filename) { const dot = filename.lastIndexOf("."); return dot > 0 ? filename.slice(0, dot) : filename; }
     function defaultSearchKey(name) { return name.normalize("NFKD").replace(/[^a-zA-Z0-9]+/g, "").toUpperCase(); }
     function normalizePlatformKey(name) { return String(name || "").toLowerCase().replace(/[^a-z0-9]+/g, ""); }
@@ -270,7 +321,14 @@
       return tokens.map(token => token.length <= 4 ? token.toUpperCase() : `${token[0].toUpperCase()}${token.slice(1)}`).join(" ");
     }
     async function readText(handle) { return (await handle.getFile()).text(); }
+    async function readFileTextWithEncoding(handle) {
+      const bytes = new Uint8Array(await (await handle.getFile()).arrayBuffer());
+      return decodeTextBytes(bytes);
+    }
     async function writeFile(handle, content) { const writable = await handle.createWritable(); await writable.write(content); await writable.close(); }
+    async function writeTextWithEncoding(handle, text, encoding, includeBom) {
+      await writeFile(handle, encodeTextBytes(text, encoding, includeBom));
+    }
     function progressPercent(current, total) {
       if (!total || total <= 0) return 0;
       return Math.max(0, Math.min(100, Math.round((current / total) * 100)));
@@ -320,6 +378,26 @@
         state.globalRows = [];
         notify("cubegm/allfiles.lst was not found; platform CSV files remain editable.", true);
       }
+    }
+    async function findFavoritesList(root) {
+      try {
+        const cubegm = await root.getDirectoryHandle("cubegm");
+        state.globalDirectory = cubegm;
+        const handle = await cubegm.getFileHandle("favorites.lst");
+        const favoritesFile = await readFileTextWithEncoding(handle);
+        state.favoritesHandle = handle;
+        state.favoritesRows = parseGlobal(favoritesFile.text);
+        state.favoritesTrailingNul = true;
+        state.favoritesEncoding = favoritesFile.encoding;
+        state.favoritesHasBom = favoritesFile.hasBom;
+      } catch (error) {
+        state.favoritesHandle = null;
+        state.favoritesRows = [];
+        state.favoritesTrailingNul = true;
+        state.favoritesEncoding = "utf-8";
+        state.favoritesHasBom = false;
+      }
+      refreshFavoritePathSet();
     }
     async function scanPlatform(directory) {
       let csvHandle;
@@ -375,6 +453,7 @@
         state.root = root; state.platforms = []; state.selected = null; state.dirty = false; state.dirtyReason = ""; state.backups.clear();
         headerStatus.textContent = `Scanning ${root.name}...`;
         await findGlobalList(root);
+        await findFavoritesList(root);
         for await (const [name, entry] of root.entries()) {
           if (entry.kind !== "directory" || name.toLowerCase() === "cubegm") continue;
           const platform = await scanPlatform(entry);
@@ -445,10 +524,12 @@
       const status = rowStatus(platform, row);
       const imageKey = `${basename(row.filename)}.png`.toLowerCase();
       const rowClass = !row.listed ? "unlisted" : !status.romPresent ? "missing-rom" : "";
-      const badges = [row.listed ? `<span class="badge ok">Listed</span>` : `<span class="badge warn">Unlisted</span>`, !status.romPresent && row.listed ? `<span class="badge error">No ROM</span>` : "", status.romPresent && !status.imagePresent ? `<span class="badge warn">No image</span>` : "", status.imagePresent ? `<span class="badge ok">Image</span>` : ""].join("");
+      const badges = [row.listed ? `<span class="badge ok">Listed</span>` : `<span class="badge warn">Unlisted</span>`, !status.romPresent && row.listed ? `<span class="badge error">No ROM</span>` : "", status.romPresent && !status.imagePresent ? `<span class="badge warn">No image</span>` : "", status.imagePresent ? `<span class="badge ok">Image</span>` : "", isFavorite(platform, row) ? `<span class="badge ok">Favorite</span>` : ""].join("");
       const disabled = row.listed ? "" : "disabled";
+      const favoriteActive = isFavorite(platform, row);
+      const favoriteTitle = favoriteActive ? "Remove favorite" : "Add favorite";
       const artwork = status.imagePresent ? `<div class="thumbnail"><img data-thumbnail-key="${escapeHtml(imageKey)}" alt=""></div>` : `<div class="thumbnail"><span>−</span></div>`;
-      return `<tr class="${rowClass}" data-id="${escapeHtml(row.id)}"><td class="artwork-cell">${artwork}</td><td><input data-field="filename" value="${escapeHtml(row.filename)}" ${disabled}></td><td><input data-field="english" value="${escapeHtml(row.english)}" ${disabled}></td><td><input data-field="chinese" value="${escapeHtml(row.chinese)}" ${disabled}></td><td><input data-field="searchKey" value="${escapeHtml(row.searchKey)}" ${disabled}></td><td><div class="status-cell">${badges}</div></td><td><button class="button icon ${row.listed ? "danger" : "secondary"}" data-action="${row.listed ? "remove" : "add"}" title="${row.listed ? "Remove from lists" : "Add to lists"}">${row.listed ? "×" : "+"}</button></td></tr>`;
+      return `<tr class="${rowClass}" data-id="${escapeHtml(row.id)}"><td class="artwork-cell">${artwork}</td><td><input data-field="filename" value="${escapeHtml(row.filename)}" ${disabled}></td><td><input data-field="english" value="${escapeHtml(row.english)}" ${disabled}></td><td><input data-field="chinese" value="${escapeHtml(row.chinese)}" ${disabled}></td><td><div class="status-cell">${badges}</div></td><td><button class="button icon secondary favorite${favoriteActive ? " active" : ""}" data-action="favorite" title="${favoriteTitle}" ${row.filename ? "" : "disabled"}>★</button></td><td><button class="button icon ${row.listed ? "danger" : "secondary"}" data-action="${row.listed ? "remove" : "add"}" title="${row.listed ? "Remove from lists" : "Add to lists"}">${row.listed ? "×" : "+"}</button></td></tr>`;
     }
     async function loadThumbnail(element, platform) {
       const key = element.dataset.thumbnailKey;
@@ -484,7 +565,7 @@
       const missingImageCount = all.filter(row => { const status = rowStatus(platform, row); return status.romPresent && !status.imagePresent; }).length;
       const dirtyNote = state.dirtyReason ? `<div class="dirty-note">${escapeHtml(state.dirtyReason)}</div>` : "";
       const saveTitle = state.dirtyReason ? `title="${escapeHtml(state.dirtyReason)}"` : "";
-      main.innerHTML = `<section class="workspace"><div class="workspace-head"><div class="title"><h1>${escapeHtml(platform.name)}</h1><p>${platform.rows.length.toLocaleString()} listed · ${platform.roms.size.toLocaleString()} files on card · ${platform.images.size.toLocaleString()} images${platform.duplicateCount ? ` · ${platform.duplicateCount.toLocaleString()} duplicates merged` : ""}</p></div><div class="actions"><button class="button secondary" id="addRowButton">+ Add row</button><button class="button primary" id="saveButton" ${saveTitle} ${state.dirty ? "" : "disabled"}>Save lists${state.dirty ? " *" : ""}</button></div></div>${dirtyNote}<div class="toolbar"><input class="search" id="searchInput" type="search" placeholder="Search filenames and titles" value="${escapeHtml(state.query)}"><div class="filters">${filterButton("all", "All", platform.rows.length + unlistedCount)}${filterButton("unlisted", "Unlisted", unlistedCount)}${filterButton("missing-rom", "Missing ROM", missingRomCount)}${filterButton("missing-image", "Missing image", missingImageCount)}</div><button class="button secondary" id="addMissingButton" ${unlistedCount ? "" : "disabled"}>Add all unlisted</button></div><div class="table-wrap"><table><colgroup><col style="width:68px"><col style="width:23%"><col style="width:20%"><col style="width:18%"><col style="width:13%"><col style="width:13%"><col style="width:5%"></colgroup><thead><tr><th>Artwork</th><th class="sortable" data-sort="filename">File name${sortArrow("filename")}</th><th>English title</th><th>Chinese title</th><th>Search key</th><th class="sortable" data-sort="status">Status${sortArrow("status")}</th><th></th></tr></thead><tbody>${records.map(row => renderRow(platform, row)).join("") || `<tr><td colspan="7">No rows match this view.</td></tr>`}</tbody></table></div><div class="drop-zone" id="dropZone">${renderDropZoneContent()}</div></section>`;
+      main.innerHTML = `<section class="workspace"><div class="workspace-head"><div class="title"><h1>${escapeHtml(platform.name)}</h1><p>${platform.rows.length.toLocaleString()} listed · ${platform.roms.size.toLocaleString()} files on card · ${platform.images.size.toLocaleString()} images${platform.duplicateCount ? ` · ${platform.duplicateCount.toLocaleString()} duplicates merged` : ""}</p></div><div class="actions"><button class="button secondary" id="addRowButton">+ Add row</button><button class="button primary" id="saveButton" ${saveTitle} ${state.dirty ? "" : "disabled"}>Save lists${state.dirty ? " *" : ""}</button></div></div>${dirtyNote}<div class="toolbar"><input class="search" id="searchInput" type="search" placeholder="Search filenames and titles" value="${escapeHtml(state.query)}"><div class="filters">${filterButton("all", "All", platform.rows.length + unlistedCount)}${filterButton("unlisted", "Unlisted", unlistedCount)}${filterButton("missing-rom", "Missing ROM", missingRomCount)}${filterButton("missing-image", "Missing image", missingImageCount)}</div><button class="button secondary" id="addMissingButton" ${unlistedCount ? "" : "disabled"}>Add all unlisted</button></div><div class="table-wrap"><table><colgroup><col style="width:68px"><col style="width:25%"><col style="width:20%"><col style="width:17%"><col style="width:20%"><col style="width:7%"><col style="width:6%"></colgroup><thead><tr><th>Artwork</th><th class="sortable" data-sort="filename">File name${sortArrow("filename")}</th><th>English title</th><th>Chinese title</th><th class="sortable" data-sort="status">Status${sortArrow("status")}</th><th>Fav</th><th></th></tr></thead><tbody>${records.map(row => renderRow(platform, row)).join("") || `<tr><td colspan="7">No rows match this view.</td></tr>`}</tbody></table></div><div class="drop-zone" id="dropZone">${renderDropZoneContent()}</div></section>`;
       startThumbnailLoading(platform);
       updateDropZone();
     }
@@ -510,6 +591,39 @@
       if (platform.rows.some(row => row.filename.toLowerCase() === record.filename.toLowerCase())) return;
       platform.rows.push({ ...record, id: crypto.randomUUID(), listed: true, order: platform.rows.length });
       setDirty();
+    }
+    async function toggleFavorite(record) {
+      const platform = state.selected;
+      if (!platform || !record?.filename?.trim()) return;
+      const cubegm = state.globalDirectory || await state.root.getDirectoryHandle("cubegm");
+      state.globalDirectory = cubegm;
+      if (!(await ensureWritable(cubegm))) throw new Error("Write permission was lost.");
+      if (!state.favoritesHandle) state.favoritesHandle = await cubegm.getFileHandle("favorites.lst", { create: true });
+
+      const path = favoritePath(platform, record);
+      const pathLower = path.toLowerCase();
+      const existingIndex = state.favoritesRows.findIndex(row => (row[0] || "").toLowerCase() === pathLower);
+
+      if (existingIndex >= 0) {
+        state.favoritesRows.splice(existingIndex, 1);
+      } else {
+        const existingGlobal = state.globalRows.find(row => (row[0] || "").toLowerCase() === pathLower);
+        const english = String(record.english || "").trim() || basename(record.filename);
+        state.favoritesRows.push([
+          path,
+          english,
+          existingGlobal?.[2] || english.toUpperCase(),
+          String(record.chinese || "").trim(),
+          String(record.searchKey || "").trim() || existingGlobal?.[4] || defaultSearchKey(english)
+        ]);
+      }
+
+      refreshFavoritePathSet();
+      const favoritesContent = `${state.favoritesRows.map(row => row.map(value => String(value || "").replace(/\|/g, "/")).join("|")).join("\r\n")}\r\n${state.favoritesTrailingNul ? "\0" : ""}`;
+      await ensureBackup(cubegm, "favorites.lst", state.favoritesHandle);
+      await writeTextWithEncoding(state.favoritesHandle, favoritesContent, state.favoritesEncoding, state.favoritesHasBom);
+      notify(existingIndex >= 0 ? `Removed ${record.filename} from favorites.` : `Added ${record.filename} to favorites.`);
+      renderWorkspace();
     }
     async function saveCurrent() {
       const platform = state.selected;
@@ -687,6 +801,11 @@
       if (event.target.closest("#saveButton")) return saveCurrent();
       const action = event.target.closest("[data-action]"), tableRow = event.target.closest("tr[data-id]");
       if (!action || !tableRow) return;
+      if (action.dataset.action === "favorite") {
+        const record = allRecords(state.selected).find(row => row.id === tableRow.dataset.id);
+        if (!record) return;
+        return void toggleFavorite(record).catch(error => notify(`Favorite update failed: ${friendlyError(error)}`, true));
+      }
       if (action.dataset.action === "remove") { state.selected.rows = state.selected.rows.filter(row => row.id !== tableRow.dataset.id); setDirty(); }
       else { const record = allRecords(state.selected).find(row => row.id === tableRow.dataset.id); if (record) addRecord(record); }
       renderWorkspace();
