@@ -77,6 +77,8 @@
     .table-wrap { min-height: 0; overflow: auto; background: var(--panel); border: 1px solid var(--line); border-radius: 14px; }
     table { width: 100%; border-collapse: collapse; table-layout: fixed; }
     th { position: sticky; top: 0; z-index: 2; padding: 10px 8px; color: #435273; background: #edf1fb; border-bottom: 1px solid var(--line); text-align: left; font-size: 11px; letter-spacing: .04em; text-transform: uppercase; }
+    th.sortable { cursor: pointer; user-select: none; }
+    th.sortable:hover { background: #e7edfb; }
     td { padding: 6px 7px; border-bottom: 1px solid #e6e7df; vertical-align: middle; }
     tbody tr:hover { background: #f3f6ff; }
     tbody tr.unlisted { background: #fff8e8; }
@@ -161,7 +163,7 @@
   </script>
   <script>
     "use strict";
-    const state = { root: null, platforms: [], selected: null, globalHandle: null, globalDirectory: null, globalRows: [], globalTrailingNul: false, query: "", filter: "all", dirty: false, backups: new Set(), thumbnailObserver: null, archiveApiPromise: null, zipApiPromise: null, progress: null };
+    const state = { root: null, platforms: [], selected: null, globalHandle: null, globalDirectory: null, globalRows: [], globalTrailingNul: false, query: "", filter: "all", sortBy: "filename", sortDir: "asc", dirty: false, backups: new Set(), thumbnailObserver: null, archiveApiPromise: null, zipApiPromise: null, progress: null };
     const platformList = document.querySelector("#platformList");
     const main = document.querySelector("#main");
     const headerStatus = document.querySelector("#headerStatus");
@@ -391,6 +393,34 @@
     function rowStatus(platform, row) {
       return { romPresent: platform.roms.has(row.filename.toLowerCase()), imagePresent: platform.images.has(`${basename(row.filename)}.png`.toLowerCase()) };
     }
+    function statusRank(platform, row) {
+      const status = rowStatus(platform, row);
+      if (row.listed && !status.romPresent) return 0;
+      if (!row.listed) return 1;
+      if (status.romPresent && !status.imagePresent) return 2;
+      return 3;
+    }
+    function compareText(left, right) {
+      return String(left || "").localeCompare(String(right || ""), undefined, { numeric: true, sensitivity: "base" });
+    }
+    function compareRecords(platform, left, right) {
+      if (state.sortBy === "status") {
+        const statusDelta = statusRank(platform, left) - statusRank(platform, right);
+        if (statusDelta !== 0) return statusDelta;
+      }
+      const filenameDelta = compareText(left.filename, right.filename);
+      if (filenameDelta !== 0) return filenameDelta;
+      return compareText(left.english, right.english);
+    }
+    function sortRecords(platform, records) {
+      records.sort((left, right) => compareRecords(platform, left, right));
+      if (state.sortDir === "desc") records.reverse();
+      return records;
+    }
+    function sortArrow(sortBy) {
+      if (state.sortBy !== sortBy) return "";
+      return state.sortDir === "asc" ? " ▲" : " ▼";
+    }
     function allRecords(platform) {
       const records = [...platform.rows];
       const listedNames = new Set(platform.rows.map(row => row.filename.toLowerCase()));
@@ -401,12 +431,13 @@
     }
     function visibleRecords(platform) {
       const query = state.query.trim().toLowerCase();
-      return allRecords(platform).filter(row => {
+      const records = allRecords(platform).filter(row => {
         const status = rowStatus(platform, row);
         const searchable = `${row.filename} ${row.english} ${row.chinese} ${row.searchKey}`.toLowerCase();
         const filterMatches = state.filter === "all" || (state.filter === "unlisted" && !row.listed) || (state.filter === "missing-rom" && row.listed && !status.romPresent) || (state.filter === "missing-image" && status.romPresent && !status.imagePresent);
         return filterMatches && (!query || searchable.includes(query));
       });
+      return sortRecords(platform, records);
     }
     function filterButton(value, label, count) { return `<button class="filter${state.filter === value ? " active" : ""}" data-filter="${value}">${label} ${count}</button>`; }
     function renderRow(platform, row) {
@@ -450,7 +481,7 @@
       const unlistedCount = all.filter(row => !row.listed).length;
       const missingRomCount = platform.rows.filter(row => !rowStatus(platform, row).romPresent).length;
       const missingImageCount = all.filter(row => { const status = rowStatus(platform, row); return status.romPresent && !status.imagePresent; }).length;
-      main.innerHTML = `<section class="workspace"><div class="workspace-head"><div class="title"><h1>${escapeHtml(platform.name)}</h1><p>${platform.rows.length.toLocaleString()} listed · ${platform.roms.size.toLocaleString()} files on card · ${platform.images.size.toLocaleString()} images${platform.duplicateCount ? ` · ${platform.duplicateCount.toLocaleString()} duplicates merged` : ""}</p></div><div class="actions"><button class="button secondary" id="addRowButton">+ Add row</button><button class="button primary" id="saveButton" ${state.dirty ? "" : "disabled"}>Save lists${state.dirty ? " *" : ""}</button></div></div><div class="toolbar"><input class="search" id="searchInput" type="search" placeholder="Search filenames and titles" value="${escapeHtml(state.query)}"><div class="filters">${filterButton("all", "All", platform.rows.length + unlistedCount)}${filterButton("unlisted", "Unlisted", unlistedCount)}${filterButton("missing-rom", "Missing ROM", missingRomCount)}${filterButton("missing-image", "Missing image", missingImageCount)}</div><button class="button secondary" id="addMissingButton" ${unlistedCount ? "" : "disabled"}>Add all unlisted</button></div><div class="table-wrap"><table><colgroup><col style="width:68px"><col style="width:23%"><col style="width:20%"><col style="width:18%"><col style="width:13%"><col style="width:13%"><col style="width:5%"></colgroup><thead><tr><th>Artwork</th><th>File name</th><th>English title</th><th>Chinese title</th><th>Search key</th><th>Status</th><th></th></tr></thead><tbody>${records.map(row => renderRow(platform, row)).join("") || `<tr><td colspan="7">No rows match this view.</td></tr>`}</tbody></table></div><div class="drop-zone" id="dropZone">${renderDropZoneContent()}</div></section>`;
+      main.innerHTML = `<section class="workspace"><div class="workspace-head"><div class="title"><h1>${escapeHtml(platform.name)}</h1><p>${platform.rows.length.toLocaleString()} listed · ${platform.roms.size.toLocaleString()} files on card · ${platform.images.size.toLocaleString()} images${platform.duplicateCount ? ` · ${platform.duplicateCount.toLocaleString()} duplicates merged` : ""}</p></div><div class="actions"><button class="button secondary" id="addRowButton">+ Add row</button><button class="button primary" id="saveButton" ${state.dirty ? "" : "disabled"}>Save lists${state.dirty ? " *" : ""}</button></div></div><div class="toolbar"><input class="search" id="searchInput" type="search" placeholder="Search filenames and titles" value="${escapeHtml(state.query)}"><div class="filters">${filterButton("all", "All", platform.rows.length + unlistedCount)}${filterButton("unlisted", "Unlisted", unlistedCount)}${filterButton("missing-rom", "Missing ROM", missingRomCount)}${filterButton("missing-image", "Missing image", missingImageCount)}</div><button class="button secondary" id="addMissingButton" ${unlistedCount ? "" : "disabled"}>Add all unlisted</button></div><div class="table-wrap"><table><colgroup><col style="width:68px"><col style="width:23%"><col style="width:20%"><col style="width:18%"><col style="width:13%"><col style="width:13%"><col style="width:5%"></colgroup><thead><tr><th>Artwork</th><th class="sortable" data-sort="filename">File name${sortArrow("filename")}</th><th>English title</th><th>Chinese title</th><th>Search key</th><th class="sortable" data-sort="status">Status${sortArrow("status")}</th><th></th></tr></thead><tbody>${records.map(row => renderRow(platform, row)).join("") || `<tr><td colspan="7">No rows match this view.</td></tr>`}</tbody></table></div><div class="drop-zone" id="dropZone">${renderDropZoneContent()}</div></section>`;
       startThumbnailLoading(platform);
       updateDropZone();
     }
@@ -619,7 +650,11 @@
             romCount += 1;
           }
         }
-        if (romCount) await saveCurrent(); else renderWorkspace();
+        if (romCount) {
+          const saved = await saveCurrent();
+          if (!saved) renderWorkspace();
+        }
+        else renderWorkspace();
         notify(`Added ${romCount} ROM(s) and ${imageCount} image(s) to ${platform.name}${convertedCount ? ` (${convertedCount} archive(s) converted to ZIP)` : ""}.`);
       } catch (error) { notify(`Drop failed: ${friendlyError(error)}`, true); }
       finally { clearProgress(); }
@@ -628,6 +663,13 @@
       const platformButton = event.target.closest("[data-platform]");
       if (platformButton) return selectPlatform(platformButton.dataset.platform);
       if (event.target.closest("#openButton") || event.target.closest("#emptyOpenButton")) return openCard();
+      const sort = event.target.closest("[data-sort]");
+      if (sort) {
+        const sortBy = sort.dataset.sort;
+        if (state.sortBy === sortBy) state.sortDir = state.sortDir === "asc" ? "desc" : "asc";
+        else { state.sortBy = sortBy; state.sortDir = "asc"; }
+        return renderWorkspace();
+      }
       const filter = event.target.closest("[data-filter]");
       if (filter) { state.filter = filter.dataset.filter; return renderWorkspace(); }
       if (event.target.closest("#addRowButton")) { addRecord({ filename: "", english: "", chinese: "", searchKey: "" }); return renderWorkspace(); }
