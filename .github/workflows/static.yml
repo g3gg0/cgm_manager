@@ -31,13 +31,19 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+      - name: Build site payload
+        run: |
+          mkdir -p site/vendor/libarchive
+          cp cgm_manager.html site/index.html
+          cp vendor/libarchive/worker-bundle.js site/vendor/libarchive/worker-bundle.js
+          cp vendor/libarchive/libarchive.wasm site/vendor/libarchive/libarchive.wasm
       - name: Setup Pages
         uses: actions/configure-pages@v5
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          # Upload entire repository
-          path: '.'
+          # Upload only static site payload
+          path: 'site'
       - name: Deploy to GitHub Pages
         id: deployment
         uses: actions/deploy-pages@v5

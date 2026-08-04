@@ -3,3 +3,4 @@ backup/
 dist/
 node_modules/
 *.log
+site/
